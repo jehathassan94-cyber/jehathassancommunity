@@ -4,7 +4,7 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
-import { supabase } from "./supabaseClient"; // استيراد اتصال سوبابيس الذي أنشأناه
+
 dotenv.config();
 
 let aiClient: any = null;
@@ -177,52 +177,34 @@ function writeDb(db: DatabaseSchema) {
 }
 
 // Log actions to the programmer sheet simulation
-
-
-// دالة تسجيل العمليات داخل سوبابيس سحابياً
-async function addSyncLog(action: string, emailAffected: string, details: string) {
-  try {
-    const newLog = {
-      id: "log_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9),
-      timestamp: new Date().toISOString(),
-      action: action,
-      email_affected: emailAffected, // متوافق مع اسم العمود في جدولك السحابي
-      details: details
-    };
-    
-    await supabase.from('sync_logs').insert([newLog]);
-  } catch (err) {
-    console.error("تعذر حفظ السجل سحابياً:", err);
-  }
+function addSyncLog(action: string, emailAffected: string, details: string) {
+  const db = readDb();
+  const newLog: SyncLog = {
+    id: "log_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9),
+    timestamp: new Date().toISOString(),
+    action,
+    emailAffected,
+    details
+  };
+  db.syncLogs.push(newLog);
+  writeDb(db);
 }
-
 
 // Enable parsers
 app.use(express.json());
 
 // API: Get List of Doctors (for secretary sign-up)
-// API: Get List of Doctors من Supabase
-app.get("/api/doctors", async (req, res) => {
-try {
-const { data: users, error } = await supabase
-  .from('users')
-  .select('id, firstName, lastName, phone, username')
-  .eq('role', 'doctor');
-
-if (error) throw error;
-
-const doctors = users.map((doc) => ({
-  id: doc.id,
-  name: `د. ${doc.firstName} ${doc.lastName}`,
-  phone: doc.phone,
-  username: doc.username
-}));
-
-res.json(doctors);
-} catch (error: any) {
-console.error("Error fetching doctors:", error);
-res.status(500).json({ success: false, error: error.message });
-}
+app.get("/api/doctors", (req, res) => {
+  const db = readDb();
+  const doctors = db.users
+    .filter((u) => u.role === "doctor")
+    .map((doc) => ({
+      id: doc.id,
+      name: `د. ${doc.firstName} ${doc.lastName}`,
+      phone: doc.phone,
+      username: doc.username
+    }));
+  res.json(doctors);
 });
 
 // API: Verification Simulation for WhatsApp
@@ -262,170 +244,94 @@ app.post("/api/verify-doc", (req, res) => {
 });
 
 // API: Check if username exists
-// API: Check if username exists في Supabase
-app.post("/api/check-username", async (req, res) => {
-const { username } = req.body;
-try {
-const { data, error } = await supabase
-  .from('users')
-  .select('username')
-  .ilike('username', username.trim())
-  .maybeSingle();
-
-if (error) throw error;
-res.json({ exists: !!data });
-} catch (error: any) {
-res.status(500).json({ error: error.message });
-}
+app.post("/api/check-username", (req, res) => {
+  const { username } = req.body;
+  const db = readDb();
+  const exists = db.users.some(u => u.username.toLowerCase() === username.toLowerCase());
+  res.json({ exists });
 });
 
 // API: Register Account
-// API: Register Account
-app.post("/api/register", async (req, res) => {
-  try {
-    const {
-      firstName,
-      lastName,
-      username,
-      password,
-      phone,
-      email,
-      role,
-      doctorId,
-      programmerPassword
-    } = req.body;
+app.post("/api/register", (req, res) => {
+  const {
+    firstName,
+    lastName,
+    username,
+    password,
+    phone,
+    email,
+    role,
+    doctorId,
+    programmerPassword
+  } = req.body;
 
-    // التحقق من كلمة سر المبرمج لحماية النظام
-    if (programmerPassword !== "Pgjmwpgjmw93*94#") {
-      return res.status(400).json({ success: false, error: "كلمة سر المبرمج غير صحيحة!" });
-    }
-
-    if (!firstName || !lastName || !username || !password || !phone || !email || !role) {
-      return res.status(400).json({ success: false, error: "الرجاء تعبئة كافة الحقول" });
-    }
-
-    if (username.includes(" ")) {
-      return res.status(400).json({ success: false, error: "اسم المستخدم يجب أن يكون بدون فراغات" });
-    }
-
-    const cleanUsername = username.trim().toLowerCase();
-
-    // 1. التحقق من عدم تكرار اسم المستخدم في Supabase
-    const { data: existingUser, error: checkError } = await supabase
-      .from('users')
-      .select('username')
-      .ilike('username', cleanUsername)
-      .maybeSingle();
-
-    if (checkError) throw checkError;
-    if (existingUser) {
-      return res.status(400).json({ success: false, error: "اسم المستخدم هذا مسجل مسبقاً" });
-    }
-
-    // 2. توليد معرف مستخدم فريد متوافق مع نظامك الحالي
-    const userId = "usr_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5);
-
-    // 3. بناء الكائن وإدراج البيانات مع تحويل الأسماء لتطابق أعمدة Supabase (Snake_Case)
-    const newUserForSupabase = {
-      id: userId,
-      first_name: firstName.trim(),
-      last_name: lastName.trim(),
-      username: cleanUsername,
-      password_hash: password, // الحفاظ على كلمة المرور النصية حسب طلبك للمراجعة
-      phone: phone.trim(),
-      email: email.trim(),
-      role: role
-    };
-
-    const { error: insertError } = await supabase
-      .from('users')
-      .insert([newUserForSupabase]);
-
-    if (insertError) throw insertError;
-
-    // تسجيل العملية في السجلات السحابية الموحدة
-    await addSyncLog(
-      "إنشاء حساب", 
-      "jehat.hassan91@gmail.com", 
-      `تم إنشاء حساب جديد بنجاح: ${role} - الاسم: ${firstName.trim()} ${lastName.trim()}`
-    );
-
-    // إعادة الكائن بصيغة الـ Frontend لتجنب أي انهيار في الواجهات
-    res.json({ 
-      success: true, 
-      user: {
-        id: userId,
-        firstName: firstName.trim(),
-        lastName: lastName.trim(),
-        username: cleanUsername,
-        passwordHash: password,
-        phone: phone.trim(),
-        email: email.trim(),
-        role: role,
-        createdAt: new Date().toISOString()
-      } 
-    });
-
-  } catch (error: any) {
-    console.error("Register Error:", error);
-    res.status(500).json({ success: false, error: error.message || "حدث خطأ أثناء التسجيل" });
+  // Validation
+  if (programmerPassword !== "Pgjmwpgjmw93*94#") {
+    return res.status(400).json({ success: false, error: "كلمة سر المبرمج غير صحيحة!" });
   }
+
+  if (!firstName || !lastName || !username || !password || !phone || !email || !role) {
+    return res.status(400).json({ success: false, error: "الرجاء تعبئة كافة الحقول" });
+  }
+
+  if (username.includes(" ")) {
+    return res.status(400).json({ success: false, error: "اسم المستخدم يجب أن يكون بدون فراغات" });
+  }
+
+  const db = readDb();
+  if (db.users.some(u => u.username.toLowerCase() === username.trim().toLowerCase())) {
+    return res.status(400).json({ success: false, error: "اسم المستخدم هذا مسجل مسبقاً" });
+  }
+
+  const userId = "usr_" + Date.now() + "_" + Math.random().toString(36).substr(2, 5);
+  let doctorName = "";
+  if (role === "secretary" && doctorId) {
+    const doc = db.users.find(u => u.id === doctorId);
+    if (doc) {
+      doctorName = `د. ${doc.firstName} ${doc.lastName}`;
+    }
+  }
+
+  const newUser: User = {
+    id: userId,
+    firstName: firstName.trim(),
+    lastName: lastName.trim(),
+    username: username.trim().toLowerCase(),
+    passwordHash: password, // For easy recovery/view by the programmer as requested
+    phone: phone.trim(),
+    email: email.trim(),
+    role,
+    doctorId,
+    doctorName,
+    createdAt: new Date().toISOString()
+  };
+
+  db.users.push(newUser);
+  writeDb(db);
+
+  addSyncLog("إنشاء حساب", "jehat.hassan91@gmail.com", `تم إنشاء حساب جديد بنجاح: ${newUser.role} - الاسم: ${newUser.firstName} ${newUser.lastName} - اسم المستخدم: ${newUser.username}`);
+
+  res.json({ success: true, user: newUser });
 });
 
 // API: Login
-// API: Login
-
-// API: Login
-app.post("/api/login", async (req, res) => {
-  try {
-    const { username, password } = req.body;
-    if (!username || !password) {
-      return res.status(400).json({ success: false, error: "الرجاء إدخال اسم المستخدم وكلمة المرور" });
-    }
-
-    const cleanUsername = username.trim().toLowerCase();
-
-    // استعلام للبحث عن الحساب ومطابقة كلمة المرور مباشرة من Supabase
-    const { data: user, error } = await supabase
-      .from('users')
-      .select('*')
-      .ilike('username', cleanUsername)
-      .eq('password_hash', password)
-      .maybeSingle();
-
-    if (error) throw error;
-
-    if (!user) {
-      return res.status(401).json({ success: false, error: "اسم المستخدم أو كلمة المرور غير صحيحة" });
-    }
-
-    // كتابة العملية السجل السحابي
-    await addSyncLog(
-      "تسجيل دخول", 
-      "jehat.hassan91@gmail.com", 
-      `تم تسجيل دخول المستخدم: ${user.username} (${user.role})`
-    );
-
-    // تحويل البيانات الراجعة من صيغة قاعدة البيانات (Snake_Case) إلى صيغة الـ Frontend المتوقعة (CamelCase)
-    res.json({
-      success: true,
-      user: {
-        id: user.id,
-        firstName: user.first_name,
-        lastName: user.last_name,
-        username: user.username,
-        passwordHash: user.password_hash,
-        phone: user.phone,
-        email: user.email,
-        role: user.role,
-        createdAt: user.created_at
-      }
-    });
-
-  } catch (error: any) {
-    console.error("Login Error:", error);
-    res.status(500).json({ success: false, error: error.message || "حدث خطأ أثناء تسجيل الدخول" });
+app.post("/api/login", (req, res) => {
+  const { username, password } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ success: false, error: "الرجاء إدخال اسم المستخدم وكلمة المرور" });
   }
+
+  const db = readDb();
+  const user = db.users.find(
+    (u) => u.username.toLowerCase() === username.trim().toLowerCase() && u.passwordHash === password
+  );
+
+  if (!user) {
+    return res.status(401).json({ success: false, error: "اسم المستخدم أو كلمة المرور غير صحيحة" });
+  }
+
+  addSyncLog("تسجيل دخول", "jehat.hassan91@gmail.com", `تم تسجيل دخول المستخدم: ${user.username} (${user.role})`);
+  res.json({ success: true, user });
 });
 
 // API: Update User Info
@@ -529,426 +435,230 @@ app.post("/api/forgot-password", (req, res) => {
 });
 
 // Patients Routing
+app.get("/api/patients", (req, res) => {
+  const { doctorId, secretaryId } = req.query;
+  const db = readDb();
+  let list = db.patients;
 
-// Patients Routing - جلب المرضى وتصفيتهم سحابياً
-app.get("/api/patients", async (req, res) => {
-  try {
-    const { doctorId, secretaryId } = req.query;
-    
-    // بدء بناء استعلام Supabase على جدول patients
-    let query = supabase.from('patients').select('*');
-
-    // تصفية البيانات من جهة السيرفر بناءً على المعاملات المرسلة
-    if (doctorId) {
-      query = query.eq('doctor_id', doctorId);
-    } else if (secretaryId) {
-      query = query.eq('secretary_id', secretaryId);
-    }
-
-    const { data: patients, error } = await query;
-
-    if (error) throw error;
-
-    // تحويل صيغة الحقول الراجعة من Supabase (Snake_Case) إلى صيغة الـ Frontend (CamelCase) لضمان عدم حدوث أخطاء بالواجهات
-    const formattedList = (patients || []).map(p => ({
-      id: p.id,
-      name: p.name,
-      phone: p.phone,
-      datetime: p.datetime,
-      status: p.status,
-      secretaryId: p.secretary_id,
-      doctorId: p.doctor_id,
-      createdAt: p.created_at
-    }));
-
-    // إرسال القائمة الجاهزة للوحة التحكم
-    res.json(formattedList);
-
-  } catch (error: any) {
-    console.error("Fetch Patients Error:", error);
-    res.status(500).json({ success: false, error: error.message || "حدث خطأ أثناء جلب بيانات المرضى" });
+  if (doctorId) {
+    list = list.filter(p => p.doctorId === doctorId);
+  } else if (secretaryId) {
+    list = list.filter(p => p.secretaryId === secretaryId);
   }
-});
-// API: إضافة مريض مراجع جديد سحابياً
-app.post("/api/patients", async (req, res) => {
-  try {
-    const { 
-      name, 
-      phone, 
-      datetime, 
-      age, 
-      height, 
-      weight, 
-      amountPaid, 
-      isReview, 
-      secretaryId, 
-      doctorId 
-    } = req.body;
 
-    if (!name || !secretaryId || !doctorId) {
-      return res.status(400).json({ success: false, error: "الرجاء إدخال اسم المريض وضمان تحديد الحسابات" });
-    }
-
-    // 1. توليد معرف المريض الفريد المعتمد في نظامك
-    const patientId = "pat_" + Date.now();
-    const currentDateTime = datetime || new Date().toISOString();
-
-    // 2. بناء كائن البيانات متوافقاً مع أعمدة جدول Supabase الحالي (Snake_Case)
-    const newPatientForSupabase = {
-      id: patientId,
-      name: name.trim(),
-      phone: phone || "",
-      datetime: currentDateTime,
-      status: "waiting",
-      secretary_id: secretaryId,
-      doctor_id: doctorId
-    };
-
-    // 3. إدراج المريض مباشرة في جدول patients بـ Supabase
-    const { error: insertError } = await supabase
-      .from('patients')
-      .insert([newPatientForSupabase]);
-
-    if (insertError) throw insertError;
-
-    // 4. إعداد تفاصيل السجل للحفاظ على بيانات (العمر، الطول، الوزن، الدفع) في الـ sync_logs السحابي
-    const typeLabel = !!isReview ? "مراجعة مجانية / استشارة" : `كشفية بقيمة ${Number(amountPaid) || 0} د.ع/$`;
-    const detailedLog = `قام السكرتير بإضافة مريض جديد: ${name} (النوع: ${typeLabel} | العمر: ${age || 'غير محدد'} | الطول: ${height || 'غير محدد'} | الوزن: ${weight || 'غير محدد'})`;
-    
-    // تسجيل العملية سحابياً
-    await addSyncLog("إضافة مريض مراجع", "jehat.hassan91@gmail.com", detailedLog);
-
-    // 5. إرجاع النتيجة لصيغة الـ Frontend المتوقعة (CamelCase) حتى لا يتوقف المتصفح
-    res.json({ 
-      success: true, 
-      patient: {
-        id: patientId,
-        name,
-        phone: phone || "",
-        datetime: currentDateTime,
-        age: age || "",
-        height: height || "",
-        weight: weight || "",
-        status: "waiting",
-        secretaryId,
-        doctorId,
-        amountPaid: Number(amountPaid) || 0,
-        isReview: !!isReview,
-        createdAt: new Date().toISOString()
-      } 
-    });
-
-  } catch (error: any) {
-    console.error("Insert Patient Error:", error);
-    res.status(500).json({ success: false, error: error.message || "حدث خطأ أثناء إضافة المريض" });
-  }
+  res.json(list);
 });
 
+app.post("/api/patients", (req, res) => {
+  const { name, phone, datetime, age, height, weight, amountPaid, isReview, secretaryId, doctorId } = req.body;
+  if (!name || !secretaryId || !doctorId) {
+    return res.status(400).json({ success: false, error: "الرجاء إدخال اسم المريض" });
+  }
+
+  const db = readDb();
+  const newPatient: Patient = {
+    id: "pat_" + Date.now(),
+    name,
+    phone: phone || "",
+    datetime: datetime || new Date().toISOString(),
+    age: age || "",
+    height: height || "",
+    weight: weight || "",
+    status: "waiting",
+    secretaryId,
+    doctorId,
+    amountPaid: Number(amountPaid) || 0,
+    isReview: !!isReview,
+    createdAt: new Date().toISOString()
+  };
+
+  db.patients.push(newPatient);
+  writeDb(db);
+
+  const typeLabel = !!isReview ? "مراجعة مجانية / استشارة" : `كشفية بقيمة ${Number(amountPaid) || 0} د.ع/$`;
+  addSyncLog("إضافة مريض مراجع", "jehat.hassan91@gmail.com", `قام السكرتير بإضافة مريض جديد: ${name} (النوع: ${typeLabel} | العمر: ${age || 'غير محدد'} | الطول: ${height || 'غير محدد'} | الوزن: ${weight || 'غير محدد'})`);
+  res.json({ success: true, patient: newPatient });
+});
 
 // Update patient status (e.g. request approval, admit, complete)
-
-// API: تحديث حالة المريض في قاعدة البيانات السحابية
-app.put("/api/patients/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
-
-    if (!status) {
-      return res.status(400).json({ success: false, error: "الحالة الجديدة مطلوبة" });
-    }
-
-    // 1. جلب بيانات المريض الحالية لمعرفة الحالة القديمة واسم المريض قبل التحديث
-    const { data: currentPatient, error: fetchError } = await supabase
-      .from('patients')
-      .select('*')
-      .eq('id', id)
-      .maybeSingle();
-
-    if (fetchError) throw fetchError;
-    if (!currentPatient) {
-      return res.status(404).json({ success: false, error: "المريض غير موجود في النظام" });
-    }
-
-    const oldStatus = currentPatient.status;
-
-    // 2. تنفيذ عملية التحديث السحابي في جدول patients بـ Supabase
-    const { data: updatedPatient, error: updateError } = await supabase
-      .from('patients')
-      .update({ status: status })
-      .eq('id', id)
-      .select()
-      .single();
-
-    if (updateError) throw updateError;
-
-    // 3. صياغة تفاصيل السجل وتخزينها سحابياً في جدول الـ sync_logs
-    const logDetails = `تغيرت حالة المريض ${updatedPatient.name} من ${oldStatus} إلى ${status}`;
-    await addSyncLog("تعديل حالة مريض", "jehat.hassan91@gmail.com", logDetails);
-
-    // 4. إرجاع النتيجة لصيغة الـ Frontend المتوقعة (CamelCase) لتحديث الواجهة تلقائياً
-    res.json({ 
-      success: true, 
-      patient: {
-        id: updatedPatient.id,
-        name: updatedPatient.name,
-        phone: updatedPatient.phone,
-        datetime: updatedPatient.datetime,
-        status: updatedPatient.status,
-        secretaryId: updatedPatient.secretary_id,
-        doctorId: updatedPatient.doctor_id,
-        createdAt: updatedPatient.created_at
-      } 
-    });
-
-  } catch (error: any) {
-    console.error("Update Patient Status Error:", error);
-    res.status(500).json({ success: false, error: error.message || "حدث خطأ أثناء تحديث حالة المريض" });
+app.put("/api/patients/:id", (req, res) => {
+  const { id } = req.params;
+  const { status } = req.body;
+  
+  const db = readDb();
+  const patIdx = db.patients.findIndex(p => p.id === id);
+  if (patIdx === -1) {
+    return res.status(404).json({ success: false, error: "المريض غير موجود" });
   }
+
+  const patient = db.patients[patIdx];
+  const oldStatus = patient.status;
+  patient.status = status;
+  db.patients[patIdx] = patient;
+  writeDb(db);
+
+  addSyncLog("تعديل حالة مريض", "jehat.hassan91@gmail.com", `تغيرت حالة المريض ${patient.name} من ${oldStatus} إلى ${status}`);
+  res.json({ success: true, patient });
 });
 
 // Delete/Cancel a patient
-// API: إلغاء وحذف حجز مريض من قاعدة البيانات السحابية
-app.delete("/api/patients/:id", async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    // 1. جلب اسم المريض قبل الحذف لتسجيله في السجلات السحابية
-    const { data: patient, error: fetchError } = await supabase
-      .from('patients')
-      .select('name')
-      .eq('id', id)
-      .maybeSingle();
-
-    if (fetchError) throw fetchError;
-    if (!patient) {
-      return res.status(404).json({ success: false, error: "المريض غير موجود" });
-    }
-
-    // 2. حذف صف المريض مباشرة من جدول patients في Supabase
-    const { error: deleteError } = await supabase
-      .from('patients')
-      .delete()
-      .eq('id', id);
-
-    if (deleteError) throw deleteError;
-
-    // 3. كتابة العملية في السجل السحابي الموحد (sync_logs)
-    await addSyncLog("إلغاء مريض", "jehat.hassan91@gmail.com", `تم إلغاء وحذف المريض ${patient.name} لتغيبه أو مغادرته قاعدة البيانات السحابية`);
-
-    res.json({ success: true });
-
-  } catch (error: any) {
-    console.error("Delete Patient Error:", error);
-    res.status(500).json({ success: false, error: error.message || "حدث خطأ أثناء إلغاء حجز المريض" });
+app.delete("/api/patients/:id", (req, res) => {
+  const { id } = req.params;
+  const db = readDb();
+  const patIdx = db.patients.findIndex(p => p.id === id);
+  if (patIdx === -1) {
+    return res.status(404).json({ success: false, error: "المريض غير موجود" });
   }
+
+  const patient = db.patients[patIdx];
+  db.patients.splice(patIdx, 1);
+  writeDb(db);
+
+  addSyncLog("إلغاء مريض", "jehat.hassan91@gmail.com", `تم إلغاء وحذف المريض ${patient.name} لتغيبه أو مغادرته`);
+  res.json({ success: true });
 });
 
-// Prescriptions routing - جلب الوصفات والروشتات الطبية سحابياً
-app.get("/api/prescriptions", async (req, res) => {
-  try {
-    const { doctorId } = req.query;
+// Prescriptions routing
+app.get("/api/prescriptions", (req, res) => {
+  const { doctorId } = req.query;
+  const db = readDb();
+  let list = db.prescriptions;
 
-    // بدء بناء استعلام Supabase لجلب الروشتات
-    let query = supabase.from('prescriptions').select('*');
-
-    // تصفية الروشتات بناءً على معرف الطبيب المعالج إن وجد
-    if (doctorId) {
-      query = query.eq('doctor_id', doctorId);
-    }
-
-    const { data: prescriptions, error } = await query;
-
-    if (error) throw error;
-
-    // تحويل الحقول من صيغة قاعدة البيانات (Snake_Case) إلى صيغة الواجهات (CamelCase)
-    const formattedPrescriptions = (prescriptions || []).map(p => ({
-      id: p.id,
-      patientId: p.patient_id,
-      doctorId: p.doctor_id,
-      details: p.details,
-      createdAt: p.created_at
-    }));
-
-    res.json(formattedPrescriptions);
-
-  } catch (error: any) {
-    console.error("Fetch Prescriptions Error:", error);
-    res.status(500).json({ success: false, error: error.message || "حدث خطأ أثناء جلب الوصفات الطبية" });
+  if (doctorId) {
+    list = list.filter(p => p.doctorId === doctorId);
   }
+  res.json(list);
 });
-// API: كتابة أو تحديث وصفة طبية وتحويل حالة المريض تلقائياً إلى مكتمل
-app.post("/api/prescriptions", async (req, res) => {
-  try {
-    const { patientId, patientName, doctorId, medicines, xrays, tests, other } = req.body;
-    
-    if (!patientId || !doctorId) {
-      return res.status(400).json({ success: false, error: "معلومات الطبيب والمريض مطلوبة" });
-    }
 
-    // 1. تجميع الحقول الفرعية المتوقعة من الـ Frontend في حقل نصوص موحد (JSON) ليطابق عمود details في Supabase
-    const detailedData = {
+app.post("/api/prescriptions", (req, res) => {
+  const { patientId, patientName, doctorId, medicines, xrays, tests, other } = req.body;
+  if (!patientId || !doctorId) {
+    return res.status(400).json({ success: false, error: "معلومات الطبيب والمريض مطلوبة" });
+  }
+
+  const db = readDb();
+  
+  // Find if prescription already exists for this patient encounter
+  const existingIdx = db.prescriptions.findIndex(p => p.patientId === patientId);
+  
+  let resultPrescription: Prescription;
+  
+  if (existingIdx !== -1) {
+    // Update existing one
+    db.prescriptions[existingIdx].medicines = medicines || "";
+    db.prescriptions[existingIdx].xrays = xrays || "";
+    db.prescriptions[existingIdx].tests = tests || "";
+    db.prescriptions[existingIdx].other = other || "";
+    db.prescriptions[existingIdx].updatedAt = new Date().toISOString(); // optional
+    resultPrescription = db.prescriptions[existingIdx];
+  } else {
+    // Create new
+    const newPres: Prescription = {
+      id: "pres_" + Date.now(),
+      patientId,
+      patientName,
+      doctorId,
       medicines: medicines || "",
       xrays: xrays || "",
       tests: tests || "",
-      other: other || ""
+      other: other || "",
+      createdAt: new Date().toISOString()
     };
-    const detailsString = JSON.stringify(detailedData);
-
-    // 2. التحقق مما إذا كان هناك وصفة طبية مسجلة مسبقاً لهذا المريض في Supabase
-    const { data: existingPres, error: fetchError } = await supabase
-      .from('prescriptions')
-      .select('*')
-      .eq('patient_id', patientId)
-      .maybeSingle();
-
-    if (fetchError) throw fetchError;
-
-    let resultPrescriptionId: string | number;
-    let isUpdate = false;
-
-    if (existingPres) {
-      // تحديث الوصفة الحالية
-      isUpdate = true;
-      resultPrescriptionId = existingPres.id;
-
-      const { error: updateError } = await supabase
-        .from('prescriptions')
-        .update({ details: detailsString, doctor_id: doctorId })
-        .eq('patient_id', patientId);
-
-      if (updateError) throw updateError;
-    } else {
-      // إنشاء وصفة طبية جديدة سحابياً
-      const { data: newPres, error: insertError } = await supabase
-        .from('prescriptions')
-        .insert([{
-          patient_id: patientId,
-          doctor_id: doctorId,
-          details: detailsString
-        }])
-        .select()
-        .single();
-
-      if (insertError) throw insertError;
-      resultPrescriptionId = newPres.id;
-    }
-
-    // 3. تحديث حالة المريض تلقائياً إلى "completed" (مكتمل) في جدول patients
-    const { error: patientUpdateError } = await supabase
-      .from('patients')
-      .update({ status: 'completed' })
-      .eq('id', patientId);
-
-    if (patientUpdateError) console.error("تنبيه: تعذر تحديث حالة المريض إلى مكتمل سحابياً:", patientUpdateError);
-
-    // 4. صياغة تفاصيل السجل السحابي وتخزينه في جدول sync_logs
-    const logDetails = `قام الطبيب بكتابة وصفة (راشيتة) للمريض ${patientName || 'المحدد'}: الأدوية (${medicines || ''}), الأشعة (${xrays || ''}), الفحوصات (${tests || ''}), أخرى (${other || ''})`;
-    await addSyncLog("كتابة وصفة طبية", "jehat.hassan91@gmail.com", logDetails);
-
-    // 5. إرجاع النتيجة بالهيكل الذي ينتظره الـ Frontend لضمان عدم توقف الواجهات
-    res.json({ 
-      success: true, 
-      prescription: {
-        id: resultPrescriptionId,
-        patientId,
-        patientName,
-        doctorId,
-        medicines: medicines || "",
-        xrays: xrays || "",
-        tests: tests || "",
-        other: other || "",
-        createdAt: new Date().toISOString()
-      } 
-    });
-
-  } catch (error: any) {
-    console.error("Prescription Process Error:", error);
-    res.status(500).json({ success: false, error: error.message || "حدث خطأ أثناء معالجة الوصفة الطبية" });
+    db.prescriptions.push(newPres);
+    resultPrescription = newPres;
   }
+  
+  // Mark patient as completed automatically
+  const patIdx = db.patients.findIndex(p => p.id === patientId);
+  if (patIdx !== -1) {
+    db.patients[patIdx].status = "completed";
+  }
+
+  writeDb(db);
+
+  addSyncLog("كتابة وصفة طبية", "jehat.hassan91@gmail.com", `قام الطبيب بكتابة وصفة (راشيتة) للمريض ${patientName}: الأدوية (${resultPrescription.medicines}), الأشعة (${resultPrescription.xrays}), الفحوصات (${resultPrescription.tests}), أخرى (${resultPrescription.other})`);
+  res.json({ success: true, prescription: resultPrescription });
 });
 
 // API: Smart AI clinical suggestions based on current symptoms and diseases
-// API: معالج ومساعد العيادات الطبي المعتمد على الذكاء الاصطناعي والقواعد الذكية
 app.post("/api/gemini/suggest", async (req, res) => {
+  const { symptoms } = req.body;
+  if (!symptoms || !Array.isArray(symptoms) || symptoms.length === 0) {
+    return res.json({ medicines: [], xrays: [], tests: [] });
+  }
+
+  const queryText = symptoms.join(", ");
+  const normalizedQuery = queryText.toLowerCase();
+
+  // If API key is not present, use an intelligent interactive symptom-based clinical rules parser
+  if (!process.env.GEMINI_API_KEY) {
+    let medicines: string[] = ["Paracetamol 500mg - 3 times daily", "Amoxicillin 500mg - twice daily"];
+    let xrays: string[] = [];
+    let tests: string[] = ["CBC (فحص دم كامل)", "CRP (مؤشر الالتهابات)"];
+
+    if (normalizedQuery.includes("سيلان") || normalizedQuery.includes("انف") || normalizedQuery.includes("حلق") || normalizedQuery.includes("بلعوم") || normalizedQuery.includes("حرق البلعوم")) {
+      medicines = [
+        "Panadol Cold & Flu - حبة كل 8 ساعات لإزالة الاحتقان",
+        "Amoxicillin 500mg - كبسولة كل 8 ساعات لمدة 5 أيام",
+        "Claritin 10mg - حبة ليلاً مضاد تحسس",
+        "Decatylen Lozenges - حبوب مص لتسكين وتطهير البلعوم",
+        "Saline Nasal Spray - بخاخ أنف ملحي مرطب"
+      ];
+      xrays = ["Chest X-Ray (تصوير الصدر الشعاعي لتأكيد سلامة الرئتين)"];
+      tests = ["CBC (فحص الدم العام)", "Throat Swab Culture (مسحة وزرع البلعوم لمقاومة المضادات)"];
+    } else if (normalizedQuery.includes("حرارة") || normalizedQuery.includes("سخونة") || normalizedQuery.includes("حمى") || normalizedQuery.includes("نوم")) {
+      medicines = [
+        "Paracetamol 500mg - كبسولة عند الحاجة كل 6 ساعات",
+        "Brufen 400mg - مسكن ومضاد وذمة بعد الطعام عند اللزوم",
+        "Cefixime 400mg - مضاد التهاب واسع الطيف حبة يومياً"
+      ];
+      xrays = ["Chest X-Ray AP/LAT (لتشخيص التهابات الرئة والقصيبات)"];
+      tests = ["Widal Test (فحص حمى التيفويد وبكتيريا السالمونيلا)", "CBC with ESR (فحص الكريات وسرعة الترسيب)", "GUE (تحليل الإدرار العام لاستبعاد التهاب المجاري)"];
+    } else if (normalizedQuery.includes("حساسية") || normalizedQuery.includes("ربو") || normalizedQuery.includes("طفل") || normalizedQuery.includes("تحسس")) {
+      medicines = [
+        "Zyrtec Syrup 5ml - ملعقة صغيرة مساءً للأطفال",
+        "Ventolin Inhaler - بخاخ فنتولين بختين عند الشعور بضيق التنفس",
+        "Prednisolone 5mg - حبة صباحاً بعد الأكل لمدة 3 أيام للتحسس الحاد",
+        "Singulair 5mg - حبة مضغ للأطفال ليلاً لدعم التنفس"
+      ];
+      xrays = ["Chest X-Ray / Sinus View (أشعة الصدر أو الجيوب الأنفية)"];
+      tests = ["IgE Total (فحص الأجسام المضادة لنسب الحساسية)", "CBC (Eosinophils Blood Count)"];
+    } else if (normalizedQuery.includes("مغص") || normalizedQuery.includes("بطن") || normalizedQuery.includes("اسهال") || normalizedQuery.includes("تسمم") || normalizedQuery.includes("تقيؤ")) {
+      medicines = [
+        "Flagyl 505mg - حبة 3 مرات يومياً مطهر معوي",
+        "Buscopan Tablet - حبة عند الألم لتشنجات البطن ومغص المعاء",
+        "Motilium 10mg - حبة قبل الطعام بربع ساعة لمنع الغثيان",
+        "O.R.S Sachets - كيس محاليل مائية في قدح ماء لتعويض جفاف الإسهال"
+      ];
+      xrays = ["Abdominal Ultrasound (سونار البطن والحوض الشامل)"];
+      tests = ["Stool Analysis & Culture (تحليل الخروج العام وزرعه للجراثيم)", "CBC & Serum Electrolytes (تحليل الإلكتروليتات والأملاح)"];
+    } else if (normalizedQuery.includes("رأس") || normalizedQuery.includes("صداع") || normalizedQuery.includes("شقيقة") || normalizedQuery.includes("ضغط")) {
+      medicines = [
+        "Advil Cold & Headache - حبة عند اللزوم لتخفيف آلام الصداع",
+        "Imigran 50mg - حبة واحدة فور بدء نوبة الشقيقة (الصداع النصفي)",
+        "Panadol Joint - حبتين ممتدة المفعول كل 8 ساعات"
+      ];
+      xrays = ["Brain CT Scan (مفراس الرأس والدماغ عند الشك بأسباب عضوية)"];
+      tests = ["Blood Pressure Monitoring (مراقبة وقياس مستمر لضغط الدم)", "CBC and Serum Iron (فحص فقر الدم والحديد)"];
+    }
+
+    return res.json({
+      medicines,
+      xrays,
+      tests,
+      isSimulated: true,
+      info: "تنبيه: تم استخدام الذكاء الاصطناعي المدمج بالعيادة بنجاح."
+    });
+  }
+
   try {
-    const { symptoms } = req.body;
-    if (!symptoms || !Array.isArray(symptoms) || symptoms.length === 0) {
-      return res.json({ medicines: [], xrays: [], tests: [] });
-    }
-
-    const queryText = symptoms.join(", ");
-    const normalizedQuery = queryText.toLowerCase();
-
-    // 1. نظام القواعد السريرية التلقائي (في حال عدم تفعيل مفتاح البيئة السحابية)
-    if (!process.env.GEMINI_API_KEY) {
-      let medicines: string[] = ["Paracetamol 500mg - 3 times daily", "Amoxicillin 500mg - twice daily"];
-      let xrays: string[] = [];
-      let tests: string[] = ["CBC (فحص دم كامل)", "CRP (مؤشر الالتهابات)"];
-
-      if (normalizedQuery.includes("سيلان") || normalizedQuery.includes("انف") || normalizedQuery.includes("حلق") || normalizedQuery.includes("بلعوم") || normalizedQuery.includes("حرق البلعوم")) {
-        medicines = [
-          "Panadol Cold & Flu - حبة كل 8 ساعات لإزالة الاحتقان",
-          "Amoxicillin 500mg - كبسولة كل 8 ساعات لمدة 5 أيام",
-          "Claritin 10mg - حبة ليلاً مضاد تحسس",
-          "Decatylen Lozenges - حبوب مص لتسكين وتطهير البلعوم",
-          "Saline Nasal Spray - بخاخ أنف ملحي مرطب"
-        ];
-        xrays = ["Chest X-Ray (تصوير الصدر الشعاعي لتأكيد سلامة الرئتين)"];
-        tests = ["CBC (فحص الدم العام)", "Throat Swab Culture (مسحة وزرع البلعوم لمقاومة المضادات)"];
-      } else if (normalizedQuery.includes("حرارة") || normalizedQuery.includes("سخونة") || normalizedQuery.includes("حمى") || normalizedQuery.includes("نوم")) {
-        medicines = [
-          "Paracetamol 500mg - كبسولة عند الحاجة كل 6 ساعات",
-          "Brufen 400mg - مسكن ومضاد وذمة بعد الطعام عند اللزوم",
-          "Cefixime 400mg - مضاد التهاب واسع الطيف حبة يومياً"
-        ];
-        xrays = ["Chest X-Ray AP/LAT (لتشخيص التهابات الرئة والقصيبات)"];
-        tests = ["Widal Test (فحص حمى التيفويد وبكتيريا السالمونيلا)", "CBC with ESR (فحص الكريات وسرعة الترسيب)", "GUE (تحليل الإدرار العام لاستبعاد التهاب المجاري)"];
-      } else if (normalizedQuery.includes("حساسية") || normalizedQuery.includes("ربو") || normalizedQuery.includes("طفل") || normalizedQuery.includes("تحسس")) {
-        medicines = [
-          "Zyrtec Syrup 5ml - ملعقة صغيرة مساءً للأطفال",
-          "Ventolin Inhaler - بخاخ فنتولين بختين عند الشعور بضيق التنفس",
-          "Prednisolone 5mg - حبة صباحاً بعد الأكل لمدة 3 أيام للتحسس الحاد",
-          "Singulair 5mg - حبة مضغ للأطفال ليلاً لدعم التنفس"
-        ];
-        xrays = ["Chest X-Ray / Sinus View (أشعة الصدر أو الجيوب الأنفية)"];
-        tests = ["IgE Total (فحص الأجسام المضادة لنسب الحساسية)", "CBC (Eosinophils Blood Count)"];
-      } else if (normalizedQuery.includes("مغص") || normalizedQuery.includes("بطن") || normalizedQuery.includes("اسهال") || normalizedQuery.includes("تسمم") || normalizedQuery.includes("تقيؤ")) {
-        medicines = [
-          "Flagyl 505mg - حبة 3 مرات يومياً مطهر معوي",
-          "Buscopan Tablet - حبة عند الألم لتشنجات البطن ومغص المعاء",
-          "Motilium 10mg - حبة قبل الطعام بربع ساعة لمنع الغثيان",
-          "O.R.S Sachets - كيس محاليل مائية في قدح ماء لتعويض جفاف الإسهال"
-        ];
-        xrays = ["Abdominal Ultrasound (سونار البطن والحوض الشامل)"];
-        tests = ["Stool Analysis & Culture (تحليل الخروج العام وزرعه للجراثيم)", "CBC & Serum Electrolytes (تحليل الإلكتروليتات والأملاح)"];
-      } else if (normalizedQuery.includes("رأس") || normalizedQuery.includes("صداع") || normalizedQuery.includes("شقيقة") || normalizedQuery.includes("ضغط")) {
-        medicines = [
-          "Advil Cold & Headache - حبة عند اللزوم لتخفيف آلام الصداع",
-          "Imigran 50mg - حبة واحدة فور بدء نوبة الشقيقة (الصداع النصفي)",
-          "Panadol Joint - حبتين ممتدة المفعول كل 8 ساعات"
-        ];
-        xrays = ["Brain CT Scan (مفراس الرأس والدماغ عند الشك بأسباب عضوية)"];
-        tests = ["Blood Pressure Monitoring (مراقبة وقياس مستمر لضغط الدم)", "CBC and Serum Iron (فحص فقر الدم والحديد)"];
-      }
-
-      return res.json({
-        medicines,
-        xrays,
-        tests,
-        isSimulated: true,
-        info: "تنبيه: تم استخدام الذكاء الاصطناعي المدمج بالعيادة بنجاح."
-      });
-    }
-
-    // 2. معالجة وتوليد المقترحات الطبية سحابياً عبر Gemini AI
     const client = getAiClient();
     if (!client) {
       throw new Error("Gemini AI client not initialized");
     }
 
-    // تم تعديل اسم النموذج إلى الموديل الرسمي المستقر والمتاح في الـ SDK لضمان عدم توقف الإرسال سحابياً
     const response = await client.models.generateContent({
-      model: "gemini-2.5-flash", 
+      model: "gemini-3.5-flash",
       contents: `You are an expert clinical systems assistant for doctor clinics.
 The patient presents with the following symptoms or diagnosis: "${queryText}".
 Provide a JSON object containing clinical suggestions tailored to Iraqi & Arab physicians:
@@ -1000,6 +710,7 @@ Adjust recommendations carefully if specific patient age (like "طفل 15 عام
     });
   }
 });
+
 // Chat Routing (live communication between selected Doctor and Secretary)
 app.get("/api/chat", (req, res) => {
   const { userA, userB } = req.query;
@@ -1052,57 +763,34 @@ app.get("/api/sync-logs", (req, res) => {
 });
 
 // Export database as CSV (resembling physical excel sheet)
-// API: تصدير واستخراج تقرير الـ CSV السحابي المتزامن مع شيت المبرمج
-app.get("/api/export-csv", async (req, res) => {
-  try {
-    // 1. جلب بيانات المستخدمين وسجلات العمليات بالتوازي (Parallel) من قاعدة البيانات السحابية لسرعة الاستجابة
-    const [usersResponse, logsResponse] = await Promise.all([
-      supabase.from('users').select('*'),
-      supabase.from('sync_logs').select('*')
-    ]);
+app.get("/api/export-csv", (req, res) => {
+  const db = readDb();
+  
+  // Format Users into CSV text
+  let csvContent = "\uFEFF"; // UTF-8 BOM for spreadsheet software compatibility (especially Excel displaying Arabic correctly)
+  csvContent += "الرقم التعريفي,الاسم الأول,الاسم الثاني,اسم المستخدم,كلمة المرور,رقم الهاتف,البريد الإلكتروني,الصفة/الدور,اسم الطبيب المرافق,وقت الإنشاء\n";
+  
+  db.users.forEach(u => {
+    csvContent += `"${u.id}","${u.firstName}","${u.lastName}","${u.username}","${u.passwordHash}","${u.phone}","${u.email}","${u.role}","${u.doctorName || ''}","${u.createdAt}"\n`;
+  });
 
-    if (usersResponse.error) throw usersResponse.error;
-    if (logsResponse.error) throw logsResponse.error;
+  csvContent += "\n\nسجل العمليات المتزامنة مع شيت اكسل المبرمج (jehat.hassan91@gmail.com)\n";
+  csvContent += "المعرف,التوقيت,العملية المنفذة,الحساب المتأثر,التفاصيل المزامنة\n";
+  db.syncLogs.forEach(g => {
+    csvContent += `"${g.id}","${g.timestamp}","${g.action}","${g.emailAffected}","${g.details}"\n`;
+  });
 
-    const cloudUsers = usersResponse.data || [];
-    const cloudLogs = logsResponse.data || [];
-
-    // 2. تهيئة نص الـ CSV مع ترميز UTF-8 BOM لضمان دعم برامج الجداول (مثل Excel) للغة العربية بنجاح
-    let csvContent = "\uFEFF"; 
-    csvContent += "الرقم التعريفي,الاسم الأول,الاسم الثاني,اسم المستخدم,كلمة المرور,رقم الهاتف,البريد الإلكتروني,الصفة/الدور,وقت الإنشاء\n";
-    
-    // بناء أسطر المستخدمين من البيانات الراجعة من الجدول السحابي
-    cloudUsers.forEach(u => {
-      csvContent += `"${u.id}","${u.first_name}","${u.last_name}","${u.username}","${u.password_hash}","${u.phone}","${u.email}","${u.role}","${u.created_at}"\n`;
-    });
-
-    // إضافة ترويسة سجل العمليات الخاص بنظام المزامنة
-    csvContent += "\n\nسجل العمليات المتزامنة مع قاعدة البيانات السحابية للمبرمج (jehat.hassan91@gmail.com)\n";
-    csvContent += "المعرف,التوقيت,العملية المنفذة,الحساب المتأثر,التفاصيل المزامنة\n";
-    
-    // بناء أسطر السجلات
-    cloudLogs.forEach(g => {
-      csvContent += `"${g.id}","${g.timestamp}","${g.action}","${g.email_affected}","${g.details}"\n`;
-    });
-
-    // 3. إعداد هيدر الاستجابة كملف تحميل CSV مباشر للمتصفح
-    res.setHeader("Content-Type", "text/csv; charset=utf-8");
-    res.setHeader("Content-Disposition", "attachment; filename=clinics_excel_jehat.csv");
-    res.status(200).send(csvContent);
-
-  } catch (error: any) {
-    console.error("Export CSV Error:", error);
-    res.status(500).json({ success: false, error: error.message || "حدث خطأ أثناء تصدير ملف الـ CSV" });
-  }
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", "attachment; filename=clinics_excel_jehat.csv");
+  res.status(200).send(csvContent);
 });
 
 // Vite middleware and fallbacks setup
-
-
-
-// إعداد خادم وميدل وير تشغيل المشروع سحابياً
 async function startServer() {
-  console.log("Connecting safely to Supabase cloud database layer...");
+  // Initialize the database on startup
+  console.log("Initializing local file-based database...");
+  const db = readDb();
+  console.log(`Database loaded successfully. Total users: ${db.users.length}`);
 
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -1119,7 +807,7 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server cloud system safely running on port ${PORT}`);
+    console.log(`Server running on port ${PORT}`);
   });
 }
 
