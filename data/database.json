@@ -1,0 +1,49 @@
+{
+  "users": [
+    {
+      "id": "doc-1",
+      "firstName": "أحمد",
+      "lastName": "علي",
+      "username": "ahmed",
+      "passwordHash": "123456",
+      "phone": "+9647701234567",
+      "email": "dr.ahmed@example.com",
+      "role": "doctor",
+      "createdAt": "2026-05-31T06:28:22.000Z"
+    },
+    {
+      "id": "doc-2",
+      "firstName": "سارة",
+      "lastName": "أحمد",
+      "username": "sara",
+      "passwordHash": "123456",
+      "phone": "+9647707654321",
+      "email": "dr.sara@example.com",
+      "role": "doctor",
+      "createdAt": "2026-05-31T06:28:22.000Z"
+    }
+  ],
+  "patients": [
+    {
+      "id": "pat-1",
+      "name": "محمد جاسم العلي",
+      "phone": "07712345678",
+      "datetime": "2026-05-29T10:30",
+      "status": "waiting",
+      "secretaryId": "sec-1",
+      "doctorId": "doc-1",
+      "createdAt": "2026-05-31T06:28:22.000Z"
+    }
+  ],
+  "prescriptions": [],
+  "messages": [],
+  "syncLogs": [
+    {
+      "id": "log-seed-1",
+      "timestamp": "2026-05-31T06:28:22.000Z",
+      "action": "تهيئة النظام",
+      "emailAffected": "jehat.hassan91@gmail.com",
+      "details": "إنشاء قاعدة البيانات وبدء المزامنة مع ورقة العمل"
+    }
+  ]
+}
